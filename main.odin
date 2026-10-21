@@ -561,8 +561,22 @@ main :: proc() {
 			} else {
 				env_insert(cur_env, ref_copy(op.var), val)
 			}
-		case .Inc_Var: panic("TODO")
-		case .Dec_Var: panic("TODO")
+		case .Inc_Var:
+			if val, ok := env_get(cur_env, op.var); ok do switch &v in val^ {
+			case Symbol: fmt.eprintln("error: can only increment integer variables")
+			case Number: v += 1
+			case Gc_Ref(Closure): fmt.eprintln("error: can only increment integer variables")
+			} else {
+				fmt.eprintfln("error: variable %q doesn't exist", op.var.ptr^)
+			}
+		case .Dec_Var:
+			if val, ok := env_get(cur_env, op.var); ok do switch &v in val^ {
+			case Symbol: fmt.eprintln("error: can only decrement integer variables")
+			case Number: v -= 1
+			case Gc_Ref(Closure): fmt.eprintln("error: can only decrement integer variables")
+			} else {
+				fmt.eprintfln("error: variable %q doesn't exist", op.var.ptr^)
+			}
 
 		case .Eq_Skip: panic("TODO")
 		case .Ne_Skip: panic("TODO")
