@@ -241,7 +241,7 @@ env_visit :: proc(env: any) -> Gc_Visitor {
 			if idx%2 == 0 do return assoc.var, true
 			else do switch val in assoc.val {
 			case Symbol: return val, true
-			case Number: next(visitor)
+			case Number: return next(visitor)
 			case Gc_Ref(Closure): return val, true
 			}
 		}
