@@ -73,7 +73,7 @@ Operation_Type :: enum {
 
 	Help, // display help
 
-	// TODO: Call, // call closure
+	Call, // call var args..
 	End, // end closure definition def
 
 	Quit, // quit program / closure
@@ -84,6 +84,7 @@ Operation :: struct {
 
 	var: Symbol,
 	val: Value,
+	args: []Value,
 }
 
 sym_destroy :: proc(sym: any) {
@@ -136,27 +137,48 @@ cls_visit :: proc(cls: any) -> Gc_Visitor {
 			return res, true
 		}
 
-		op_idx := visitor.index - len(this.params) - 1
+		idx := visitor.index - len(this.params) - 1
 		visitor.index += 1
-		if op_idx/2 >= len(this.ops) do return {}, false
-		op := this.ops[op_idx/2]
 
-		if op_idx%2 == 0 do #partial switch op.type {
-		case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
-		case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
-			return op.var, true
-		case: return next(visitor)
-		} else do #partial switch op.type {
-		case .Set_Var: fallthrough
-		case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
-			switch val in op.val {
-			case Symbol: return val, true
-			case Number: return next(visitor)
-			case Gc_Ref(Closure): return val, true
-			case: panic("unreachable")
+		for op in this.ops {
+			vlen := op_visit_len(op)
+			if vlen <= idx {
+				idx -= vlen
+				continue
 			}
-		case: return next(visitor)
+
+			if idx == 0 do return op.var, true
+			else if idx == 1 do #partial switch op.type {
+			case .Set_Var: fallthrough
+			case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
+				switch val in op.val {
+				case Symbol: return val, true
+				case Number: return next(visitor)
+				case Gc_Ref(Closure): return val, true
+				case: panic("unreachable")
+				}
+
+			case .Call:
+				switch val in op.args[0] {
+				case Symbol: return val, true
+				case Number: return next(visitor)
+				case Gc_Ref(Closure): return val, true
+				case: panic("unreachable")
+				}
+
+			case: panic("unreachable")
+			} else {
+				ensure(op.type == .Call)
+				switch val in op.args[idx-1] {
+				case Symbol: return val, true
+				case Number: return next(visitor)
+				case Gc_Ref(Closure): return val, true
+				case: panic("unreachable")
+				}
+			}
 		}
+
+		return {}, false
 	}
 }
 cls_new :: proc() -> Gc_Ref(Closure) {
@@ -284,6 +306,10 @@ op_delete :: proc(op: Operation) {
 	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
 		val_drop(op.val)
 	}
+	if op.type == .Call {
+		for arg in op.args do val_drop(arg)
+		delete(op.args)
+	}
 }
 op_copy :: proc(op: Operation) {
 	#partial switch op.type {
@@ -295,6 +321,34 @@ op_copy :: proc(op: Operation) {
 	case .Set_Var: fallthrough
 	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
 		val_copy(op.val)
+	}
+	if op.type == .Call {
+		for arg in op.args do val_copy(arg)
+	}
+}
+
+op_visit_len :: proc(op: Operation) -> int {
+	switch op.type {
+	case .Invalid: return 0
+
+	case .Enter, .Exit: fallthrough
+	case .Collect_Cycles, .Gc_Stats, .Inspect_Env: fallthrough
+	case .Help: fallthrough
+	case .End: fallthrough
+	case .Quit:
+		return 0
+
+	case .Inc_Var, .Dec_Var:
+		return 1
+
+	case .Set_Var: fallthrough
+	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
+		return 2
+
+	case .Call:
+		return 1 + len(op.args)
+
+	case: return 0
 	}
 }
 
@@ -324,7 +378,7 @@ op_type_map := [?] Op_Type_Mapping {
 
 	{ "hel", .Help, "help" },
 
-	// TODO: { "cal", .Call, "call" },
+	{ "cal", .Call, "call" },
 	{ "end", .End, "end" },
 
 	{ "qui", .Quit, "quit" },
@@ -354,11 +408,11 @@ parse_val :: proc(line: string) -> (val: Value, ok: bool) {
 				found_end = true
 				break
 			} else if '0' <= part[0] && part[0] <= '9' {
-				fmt.eprintln("error: a number %q is not a valid closure argument", part)
+				fmt.eprintfln("error: a number %q is not a valid closure argument", part)
 				delete(params)
 				return {}, false
 			} else if part == ":" {
-				fmt.eprintln("error: \":\" is not a valid closure argument")
+				fmt.eprintfln("error: \":\" is not a valid closure argument")
 				delete(params)
 				return {}, false
 			}
@@ -367,11 +421,11 @@ parse_val :: proc(line: string) -> (val: Value, ok: bool) {
 		}
 
 		if !found_end {
-			fmt.eprintln("error: a closure's parameter list should end with `->`")
+			fmt.eprintfln("error: a closure's parameter list should end with `->`")
 			delete(params)
 			return {}, false
 		} else if len(line) != 0 {
-			fmt.eprintln("error: nothing should occur after `->` on the first line of a closure definition")
+			fmt.eprintfln("error: nothing should occur after `->` on the first line of a closure definition")
 			delete(params)
 			return {}, false
 		}
@@ -471,7 +525,7 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 		}
 		val := parse_val(line) or_return
 
-		return { type, sym_new(sym), val }, true
+		return { type, sym_new(sym), val, {} }, true
 
 	case .Inc_Var, .Dec_Var:
 		sym, has_sym := strings.split_iterator(&line, " ")
@@ -484,9 +538,39 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 			fmt.eprintln("warning: operation %q (%s) takes only one argument, but junk was left after parsing variable name", name, op_type_str(type))
 		}
 
-		return { type, sym_new(sym), {} }, true
+		return { type, sym_new(sym), {}, {} }, true
 
-	// TODO: case .Call: ...
+	case .Call:
+		sym, has_sym := strings.split_iterator(&line, " ")
+		if !has_sym {
+			fmt.eprintfln("error: operation %q (%s) takes at least one argument, but only one provided", name, op_type_str(type))
+			return {}, false
+		}
+
+		args: [dynamic]Value
+		for part in strings.split_iterator(&line, " ") {
+			if part == ":" {
+				fmt.eprintfln("error: encountered \":\" while parsing call command; cannot pass a closure directly, assign it to a variable first")
+				for arg in args do val_drop(arg)
+				delete(args)
+				return {}, false
+			}
+
+			if '0' <= part[0] && part[0] <= '9' {
+				val, ok := strconv.parse_int(part)
+				if !ok {
+					fmt.eprintfln("error: invalid integer %q", part)
+					for arg in args do val_drop(arg)
+					delete(args)
+					return {}, false
+				}
+				append(&args, val)
+			} else {
+				append(&args, sym_new(part))
+			}
+		}
+
+		return { type, sym_new(sym), {}, args[:] }, true
 
 	case .Enter, .Exit: fallthrough
 	case .Collect_Cycles, .Gc_Stats, .Inspect_Env: fallthrough
@@ -497,7 +581,7 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 			fmt.eprintln("warning: operation %q (%s) does not take any arguments, but junk was left after parsing operation name", name, op_type_str(type))
 		}
 
-		return { type, {}, {} }, true
+		return { type, {}, {}, {} }, true
 
 	case .Invalid: fallthrough
 	case: panic("unreachable")
@@ -518,15 +602,170 @@ resolve_val :: proc(env: Gc_Ref(Env), raw_val: Value) -> (val: Value, ok: bool) 
 	case Gc_Ref(Closure):
 		res := cls_new()
 		res.ptr^ = val.ptr^
-		for param in res.ptr.params {
-			ref_copy(param)
+		res.ptr.params = make([]Symbol, len(val.ptr.params))
+		for param, idx in val.ptr.params {
+			res.ptr.params[idx] = ref_copy(param)
 		}
-		for op in res.ptr.ops {
+		res.ptr.ops = make([]Operation, len(val.ptr.ops))
+		for op, idx in val.ptr.ops {
 			op_copy(op)
+			res.ptr.ops[idx] = op
 		}
 		res.ptr.env = ref_copy(env)
 		return res, true
 	case: panic("unreachable")
+	}
+}
+
+op_set_var :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) {
+	val, ok := resolve_val(env, val)
+	if !ok do return
+
+	if var_val, ok := env_get(env, var); ok {
+		val_drop(var_val^)
+		var_val^ = val
+	} else {
+		env_insert(env, ref_copy(var), val)
+	}
+}
+op_inc_var :: proc(env: Gc_Ref(Env), var: Symbol) {
+	if val, ok := env_get(env, var); ok do switch &v in val^ {
+	case Symbol: fmt.eprintln("error: can only increment integer variables")
+	case Number: v += 1
+	case Gc_Ref(Closure): fmt.eprintln("error: can only increment integer variables")
+	} else {
+		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
+	}
+}
+op_dec_var :: proc(env: Gc_Ref(Env), var: Symbol) {
+	if val, ok := env_get(env, var); ok do switch &v in val^ {
+	case Symbol: fmt.eprintln("error: can only decrement integer variables")
+	case Number: v -= 1
+	case Gc_Ref(Closure): fmt.eprintln("error: can only decrement integer variables")
+	} else {
+		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
+	}
+}
+op_collect_cycles :: proc(env: Gc_Ref(Env)) {
+	root_env := env
+	for root_env.ptr.parent.ptr != nil do root_env = root_env.ptr.parent
+
+	fmt.println("running cycle collection...")
+	gc_mark(root_env)
+	gc_stats()
+	gc_sweep()
+	fmt.println("done!")
+}
+op_help :: proc() {
+	fmt.println("The following commands are registered:")
+	for mapping in op_type_map {
+		fmt.printfln(" - {}", mapping.full_name)
+	}
+	fmt.println("Enter a command that takes no arguments like so:")
+	fmt.println("  name")
+	fmt.println("Enter a command that only takes a variable like so:")
+	fmt.println("  name variable")
+	fmt.println("Enter a command that takes a variable and a value like so:")
+	fmt.println("(value being a number)")
+	fmt.println("  name variable 123")
+	fmt.println("(value being the value of a variable)")
+	fmt.println("  name variable other_variable")
+	fmt.println("(value being a closure definition)")
+	fmt.println("  name variable : arg1 arg2 ->")
+	fmt.println("  ... cmd1")
+	fmt.println("  ... cmd2")
+	fmt.println("  ... end")
+	fmt.println("Call a closure like so:")
+	fmt.println("  call closure_name arg1 arg2 arg3 ...")
+	fmt.println("To quit the program, call the `quit` command")
+	fmt.println("Only the first three letters of a command's name are significant")
+}
+op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
+	cls_val, has_cls := env_get(env, var)
+	if !has_cls {
+		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
+		return
+	}
+
+	cls, cls_is_cls := cls_val^.(Gc_Ref(Closure))
+	if !cls_is_cls {
+		fmt.eprintfln("error: cannot call non-closure value")
+		return
+	}
+
+	if len(args) != len(cls.ptr.params) {
+		fmt.eprintfln("error: mismatched argument count, expected {} got {}", len(cls.ptr.params), len(args))
+		return
+	}
+
+	cls_env := env_new()
+	cls_env.ptr.parent = ref_copy(env)
+	// fmt.eprintln(cls.ptr.params)
+	for i in 0..<len(args) {
+		val, ok := resolve_val(env, args[i])
+		if !ok {
+			ref_drop(cls_env)
+			return
+		}
+
+		env_insert(cls_env, ref_copy(cls.ptr.params[i]), val)
+	}
+
+	cur_env := cls_env
+
+	run_loop: for idx := 0; idx < len(cls.ptr.ops); idx += 1 {
+		op := cls.ptr.ops[idx]
+
+		switch op.type {
+		case .Set_Var: op_set_var(cur_env, op.var, op.val)
+		case .Inc_Var: op_inc_var(cur_env, op.var)
+		case .Dec_Var: op_dec_var(cur_env, op.var)
+
+		case .Eq_Skip: panic("TODO")
+		case .Ne_Skip: panic("TODO")
+		case .Lt_Skip: panic("TODO")
+		case .Le_Skip: panic("TODO")
+		case .Gt_Skip: panic("TODO")
+		case .Ge_Skip: panic("TODO")
+
+		case .Enter:
+			new_env := env_new()
+			new_env.ptr.parent = ref_copy(cur_env)
+			cur_env = new_env
+		case .Exit:
+			if cur_env == cls_env {
+				fmt.eprintln("error: cannot exit from closure's arguments environment")
+			} else {
+				old_env := cur_env
+				cur_env = old_env.ptr.parent
+				ref_drop(old_env)
+			}
+
+		case .Collect_Cycles: op_collect_cycles(env)
+		case .Gc_Stats:
+			// TODO: mark before & unmark after?
+			gc_stats()
+		case .Inspect_Env: env_display(cur_env)
+
+		case .Help: op_help()
+
+		case .Call: op_call(cur_env, op.var, op.args)
+		case .End:
+			fmt.eprintfln("Invalid command %s (THIS IS A BUG, THIS CODE PATH SHOULD BE UNREACHABLE)", op_type_str(.End))
+
+		case .Quit: break run_loop
+
+		case .Invalid: panic("unreachable")
+		}
+	}
+
+	if cur_env != cls_env {
+		fmt.eprintln("warning: a closure should exit out from any extra environments it creates")
+	}
+	for cur_env != env {
+		old_env := cur_env
+		cur_env = old_env.ptr.parent
+		ref_drop(old_env)
 	}
 }
 
@@ -551,32 +790,9 @@ main :: proc() {
 		defer op_delete(op)
 
 		switch op.type {
-		case .Set_Var:
-			val, ok := resolve_val(cur_env, op.val)
-			if !ok do break
-
-			if var_val, ok := env_get(cur_env, op.var); ok {
-				val_drop(var_val^)
-				var_val^ = val
-			} else {
-				env_insert(cur_env, ref_copy(op.var), val)
-			}
-		case .Inc_Var:
-			if val, ok := env_get(cur_env, op.var); ok do switch &v in val^ {
-			case Symbol: fmt.eprintln("error: can only increment integer variables")
-			case Number: v += 1
-			case Gc_Ref(Closure): fmt.eprintln("error: can only increment integer variables")
-			} else {
-				fmt.eprintfln("error: variable %q doesn't exist", op.var.ptr^)
-			}
-		case .Dec_Var:
-			if val, ok := env_get(cur_env, op.var); ok do switch &v in val^ {
-			case Symbol: fmt.eprintln("error: can only decrement integer variables")
-			case Number: v -= 1
-			case Gc_Ref(Closure): fmt.eprintln("error: can only decrement integer variables")
-			} else {
-				fmt.eprintfln("error: variable %q doesn't exist", op.var.ptr^)
-			}
+		case .Set_Var: op_set_var(cur_env, op.var, op.val)
+		case .Inc_Var: op_inc_var(cur_env, op.var)
+		case .Dec_Var: op_dec_var(cur_env, op.var)
 
 		case .Eq_Skip: panic("TODO")
 		case .Ne_Skip: panic("TODO")
@@ -598,40 +814,16 @@ main :: proc() {
 				ref_drop(old_env)
 			}
 
-		case .Collect_Cycles:
-			fmt.println("running cycle collection...")
-			gc_mark(root_env)
-			gc_stats()
-			gc_sweep()
-			fmt.println("done!")
+		case .Collect_Cycles: op_collect_cycles(root_env)
 		case .Gc_Stats:
 			// TODO: mark before & unmark after?
 			gc_stats()
 		case .Inspect_Env:
 			env_display(cur_env)
 
-		case .Help:
-			fmt.println("The following commands are registered:")
-			for mapping in op_type_map {
-				fmt.printfln(" - {}", mapping.full_name)
-			}
-			fmt.println("Enter a command that takes no arguments like so:")
-			fmt.println("  name")
-			fmt.println("Enter a command that only takes a variable like so:")
-			fmt.println("  name variable")
-			fmt.println("Enter a command that takes a variable and a value like so:")
-			fmt.println("(value being a number)")
-			fmt.println("  name variable 123")
-			fmt.println("(value being the value of a variable)")
-			fmt.println("  name variable other_variable")
-			fmt.println("(value being a closure definition)")
-			fmt.println("  name variable : arg1 arg2 ->")
-			fmt.println("  ... cmd1")
-			fmt.println("  ... cmd2")
-			fmt.println("  ... end")
-			fmt.println("To quit the program, call the `quit` command")
-			fmt.println("Only the first three letters of a command's name are significant")
+		case .Help: op_help()
 
+		case .Call: op_call(cur_env, op.var, op.args)
 		case .End:
 			fmt.eprintfln("Invalid command %s -- %s should only be called to finish a closure definition", op_type_str(.End), op_type_str(.End))
 

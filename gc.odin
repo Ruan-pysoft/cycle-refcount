@@ -149,56 +149,57 @@ gc_new_clone :: proc(
 	return gc_record(new_clone(val, loc=loc) or_return, destroy, visit), nil
 }
 
-_gc_get_handle :: proc(handle: Gc_Handle) -> ^Gc_Info {
+_gc_get_handle :: proc(handle: Gc_Handle, loc := #caller_location) -> ^Gc_Info {
 	if 0 > handle.index || handle.index >= len(_gc_store) {
-		fmt.panicf("corrupt gc handle: {} is not a valid index into the object table", handle.index)
+		fmt.panicf("corrupt gc handle: {} is not a valid index into the object table", handle.index, loc=loc)
 	}
 	if handle.generation < 0 || handle.generation > _gc_store[handle.index].generation {
-		fmt.panicf("corrupt gc handle: {} is not a valid generation for object slot {}", handle.generation, handle.index)
+		fmt.panicf("corrupt gc handle: {} is not a valid generation for object slot {}", handle.generation, handle.index, loc=loc)
 	}
 	if handle.generation < _gc_store[handle.index].generation {
-		fmt.panicf("use-after-free: object in slot {} of generation {} has already been freed", handle.index, handle.generation)
+		fmt.panicf("use-after-free: object in slot {} of generation {} has already been freed", handle.index, handle.generation, loc=loc)
 	}
 	if !_gc_store[handle.index].alive {
 		fmt.panicf(
 			"use-after-free: object in slot {} of generation {} with type {} has already been freed",
 			handle.index, handle.generation,
 			any_to_raw(_gc_store[handle.index].ptr).id,
+			loc=loc,
 		)
 	}
 
 	return &_gc_store[handle.index]
 }
 
-gc_get :: proc(handle: Gc_Handle) -> any {
-	info := _gc_get_handle(handle)
+gc_get :: proc(handle: Gc_Handle, loc := #caller_location) -> any {
+	info := _gc_get_handle(handle, loc=loc)
 	info.refcount += 1
 	return info.ptr
 }
 
-gc_get_noref :: proc(handle: Gc_Handle) -> any {
-	return _gc_get_handle(handle).ptr
+gc_get_noref :: proc(handle: Gc_Handle, loc := #caller_location) -> any {
+	return _gc_get_handle(handle, loc=loc).ptr
 }
 
-gc_get_typed :: proc(handle: Gc_Handle, $T: typeid) -> ^T {
-	info := _gc_get_handle(handle)
+gc_get_typed :: proc(handle: Gc_Handle, $T: typeid, loc := #caller_location) -> ^T {
+	info := _gc_get_handle(handle, loc=loc)
 	_ = info.ptr.(T) // trigger type assert
 	info.refcount += 1
 	return any_to_ptr(info.ptr)
 }
 
-gc_get_typed_noref :: proc(handle: Gc_Handle, $T: typeid) -> ^T {
-	info := _gc_get_handle(handle)
+gc_get_typed_noref :: proc(handle: Gc_Handle, $T: typeid, loc := #caller_location) -> ^T {
+	info := _gc_get_handle(handle, loc=loc)
 	_ = info.ptr.(T) // trigger type assert
 	return any_to_ptr(info.ptr, T)
 }
 
-gc_ref :: proc(handle: Gc_Handle) {
-	_gc_get_handle(handle).refcount += 1
+gc_ref :: proc(handle: Gc_Handle, loc := #caller_location) {
+	_gc_get_handle(handle, loc=loc).refcount += 1
 }
 
-gc_unref :: proc(handle: Gc_Handle) {
-	info := _gc_get_handle(handle)
+gc_unref :: proc(handle: Gc_Handle, loc := #caller_location) {
+	info := _gc_get_handle(handle, loc=loc)
 	info.refcount -= 1
 	if info.refcount == 0 {
 		if info.destroy == nil {
@@ -286,15 +287,15 @@ Gc_Ref :: struct($T: typeid) {
 	ptr: ^T,
 }
 
-ref_of :: proc(handle: Gc_Handle, $T: typeid) -> Gc_Ref(T) {
-	return { handle, gc_get_typed_noref(handle, T) }
+ref_of :: proc(handle: Gc_Handle, $T: typeid, loc := #caller_location) -> Gc_Ref(T) {
+	return { handle, gc_get_typed_noref(handle, T, loc=loc) }
 }
 
-ref_copy :: proc(ref: Gc_Ref($T)) -> Gc_Ref(T) {
-	gc_ref(ref)
+ref_copy :: proc(ref: Gc_Ref($T), loc := #caller_location) -> Gc_Ref(T) {
+	gc_ref(ref, loc=loc)
 	return ref
 }
 
-ref_drop :: proc(ref: Gc_Ref($T)) {
-	gc_unref(ref)
+ref_drop :: proc(ref: Gc_Ref($T), loc := #caller_location) {
+	gc_unref(ref, loc=loc)
 }
