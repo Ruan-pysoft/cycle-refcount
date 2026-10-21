@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:io"
 import "core:os"
 import "core:slice"
+import "core:slice/heap"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
@@ -24,10 +25,29 @@ Value :: union {
 	Gc_Ref(Closure),
 }
 
+Assoc :: struct {
+	var: Symbol,
+	val: Value,
+}
+assoc_less :: proc(a, b: Assoc) -> bool {
+	return a.var.ptr^ < b.var.ptr^
+}
+assoc_lookup :: proc(heap: []Assoc, key: Symbol, start_at := 0) -> (idx: int, ok: bool) {
+	if start_at >= len(heap) do return -1, false
+
+	if heap[start_at].var.ptr^ == key.ptr^ do return start_at, true
+	else if heap[start_at].var.ptr^ < key.ptr^ do return -1, false
+
+	lidx := start_at*2 + 1
+	ridx := start_at*2 + 2
+
+	if idx, ok = assoc_lookup(heap, key, lidx); ok do return idx, ok
+	else do return assoc_lookup(heap, key, ridx)
+}
 Env :: struct {
 	parent: Gc_Ref(Env),
 
-	env: map[Symbol]Value,
+	assocs: [dynamic]Assoc,
 }
 
 Operation_Type :: enum {
@@ -101,18 +121,23 @@ cls_visit :: proc(cls: any) -> Gc_Visitor {
 		visitor: ^Gc_Visitor_Typed(Closure),
 	) -> (handle: Gc_Handle, ok: bool) {
 		if visitor.index < 0 do return {}, false
-		defer visitor.index += 1
+		// defer doesn't seem to work??
+		//defer visitor.index += 1
 		this := visitor.this
 
 		if visitor.index == 0 {
+			visitor.index += 1
 			if this.env.ptr != nil do return this.env, true
 			else do return next(visitor)
 		}
 		if visitor.index <= len(this.params) {
-			return this.params[visitor.index-1], true
+			res := this.params[visitor.index-1]
+			visitor.index += 1
+			return res, true
 		}
 
 		op_idx := visitor.index - len(this.params) - 1
+		visitor.index += 1
 		if op_idx/2 >= len(this.ops) do return {}, false
 		op := this.ops[op_idx/2]
 
@@ -159,11 +184,11 @@ val_drop :: proc(val: Value) {
 env_destroy :: proc(env: any) {
 	env := any_to_ptr(env, Env)
 	if env.parent.ptr != nil do ref_drop(env.parent)
-	for sym, val in env.env {
-		ref_drop(sym)
-		val_drop(val)
+	for assoc in env.assocs {
+		ref_drop(assoc.var)
+		val_drop(assoc.val)
 	}
-	delete(env.env)
+	delete(env.assocs)
 	free(env)
 }
 env_visit :: proc(env: any) -> Gc_Visitor {
@@ -177,30 +202,25 @@ env_visit :: proc(env: any) -> Gc_Visitor {
 		visitor: ^Gc_Visitor_Typed(Env),
 	) -> (handle: Gc_Handle, ok: bool) {
 		if visitor.index < 0 do return {}, false
-		defer visitor.index += 1
+		// defer doesn't seem to work??
+		//defer visitor.index += 1
 		this := visitor.this
 
 		if visitor.index == 0 {
+			visitor.index += 1
 			if this.parent.ptr != nil do return this.parent, true
 			else do return next(visitor)
 		}
-		if visitor.index - 1 < len(this.env) {
-			// TODO: This is very slow; can we store more info in the visitor?
-			idx := visitor.index
-			for key in this.env {
-				idx -= 1
-				if idx == 0 do return key, true
-			}
-		}
-		if visitor.index - len(this.env) - 1 < len(this.env) {
-			idx := visitor.index
-			for _, value in this.env {
-				idx -= 1
-				if idx == 0 do switch val in value {
-				case Symbol: return val, true
-				case Number: idx = 1
-				case Gc_Ref(Closure): return val, true
-				}
+		idx := visitor.index - 1
+		visitor.index += 1
+		if idx/2 < len(this.assocs) {
+			assoc := this.assocs[idx/2]
+
+			if idx%2 == 0 do return assoc.var, true
+			else do switch val in assoc.val {
+			case Symbol: return val, true
+			case Number: next(visitor)
+			case Gc_Ref(Closure): return val, true
 			}
 		}
 
@@ -214,10 +234,15 @@ env_new :: proc() -> Gc_Ref(Env) {
 }
 
 env_get :: proc(env: Gc_Ref(Env), sym: Symbol) -> (val: ^Value, has_val: bool) {
-	val, has_val = &env.ptr.env[sym]
-	if has_val do return val, true
+	idx, ok := assoc_lookup(env.ptr.assocs[:], sym)
+	if ok do return &env.ptr.assocs[idx].val, true
 	else if env.ptr.parent.ptr != nil do return env_get(env.ptr.parent, sym)
 	else do return nil, false
+}
+// WARN: env_insert does not do *any* gc management
+env_insert :: proc(env: Gc_Ref(Env), sym: Symbol, val: Value) {
+	append(&env.ptr.assocs, { sym, val })
+	heap.push(env.ptr.assocs[:], assoc_less)
 }
 
 env_display :: proc(env: Gc_Ref(Env)) {
@@ -225,10 +250,10 @@ env_display :: proc(env: Gc_Ref(Env)) {
 
 	fmt.printfln("{{ env {}#{}", env.index, env.generation)
 
-	for sym, val in env.ptr.env {
-		sym_info := _gc_get_handle(sym)
-		fmt.printf("  {}%q: ", sym_info.refcount, sym.ptr^)
-		switch val in val {
+	for assoc in env.ptr.assocs {
+		var_info := _gc_get_handle(assoc.var)
+		fmt.printf("  {}%q: ", var_info.refcount, assoc.var.ptr^)
+		switch val in assoc.val {
 		case Symbol:
 			val_info := _gc_get_handle(val)
 			fmt.printfln("{}%q", val_info.refcount, val.ptr^)
@@ -479,8 +504,17 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 	}
 }
 
-resolve_val :: proc(env: Gc_Ref(Env), raw_val: Value) -> Value {
-	#partial switch val in raw_val {
+resolve_val :: proc(env: Gc_Ref(Env), raw_val: Value) -> (val: Value, ok: bool) {
+	switch val in raw_val {
+	case Symbol:
+		var_val, has_val := env_get(env, val)
+		if !has_val {
+			fmt.eprintfln("error: variable %q is not defined in the current scope", val)
+			return {}, false
+		}
+		return val_copy(var_val^), true
+	case Number:
+		return val, true
 	case Gc_Ref(Closure):
 		res := cls_new()
 		res.ptr^ = val.ptr^
@@ -491,8 +525,8 @@ resolve_val :: proc(env: Gc_Ref(Env), raw_val: Value) -> Value {
 			op_copy(op)
 		}
 		res.ptr.env = ref_copy(env)
-		return res
-	case: return raw_val
+		return res, true
+	case: panic("unreachable")
 	}
 }
 
@@ -518,13 +552,14 @@ main :: proc() {
 
 		switch op.type {
 		case .Set_Var:
-			val := resolve_val(cur_env, op.val)
+			val, ok := resolve_val(cur_env, op.val)
+			if !ok do break
 
 			if var_val, ok := env_get(cur_env, op.var); ok {
 				val_drop(var_val^)
 				var_val^ = val
 			} else {
-				cur_env.ptr.env[ref_copy(op.var)] = val
+				env_insert(cur_env, ref_copy(op.var), val)
 			}
 		case .Inc_Var: panic("TODO")
 		case .Dec_Var: panic("TODO")
