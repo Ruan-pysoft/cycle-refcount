@@ -280,3 +280,21 @@ gc_stats :: proc() {
 	fmt.eprintfln("{} objects are currently marked", marked)
 	fmt.eprintln()
 }
+
+Gc_Ref :: struct($T: typeid) {
+	using handle: Gc_Handle,
+	ptr: ^T,
+}
+
+ref_of :: proc(handle: Gc_Handle, $T: typeid) -> Gc_Ref(T) {
+	return { handle, gc_get_typed_noref(handle, T) }
+}
+
+ref_copy :: proc(ref: Gc_Ref($T)) -> Gc_Ref(T) {
+	gc_ref(ref)
+	return ref
+}
+
+ref_drop :: proc(ref: Gc_Ref($T)) {
+	gc_unref(ref)
+}
