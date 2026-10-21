@@ -298,7 +298,8 @@ env_display :: proc(env: Gc_Ref(Env)) {
 op_delete :: proc(op: Operation) {
 	#partial switch op.type {
 	case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
-	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
+	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip: fallthrough
+	case .Call:
 		ref_drop(op.var)
 	}
 	#partial switch op.type {
@@ -311,10 +312,11 @@ op_delete :: proc(op: Operation) {
 		delete(op.args)
 	}
 }
-op_copy :: proc(op: Operation) {
+op_copy :: proc(op: Operation) -> Operation {
 	#partial switch op.type {
 	case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
-	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip:
+	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip: fallthrough
+	case .Call:
 		ref_copy(op.var)
 	}
 	#partial switch op.type {
@@ -323,8 +325,11 @@ op_copy :: proc(op: Operation) {
 		val_copy(op.val)
 	}
 	if op.type == .Call {
-		for arg in op.args do val_copy(arg)
-	}
+		res := op
+		res.args = make([]Value, len(op.args))
+		for arg, idx in op.args do res.args[idx] = val_copy(arg)
+		return res
+	} else do return op
 }
 
 op_visit_len :: proc(op: Operation) -> int {
@@ -608,8 +613,7 @@ resolve_val :: proc(env: Gc_Ref(Env), raw_val: Value) -> (val: Value, ok: bool) 
 		}
 		res.ptr.ops = make([]Operation, len(val.ptr.ops))
 		for op, idx in val.ptr.ops {
-			op_copy(op)
-			res.ptr.ops[idx] = op
+			res.ptr.ops[idx] = op_copy(op)
 		}
 		res.ptr.env = ref_copy(env)
 		return res, true
@@ -647,11 +651,8 @@ op_dec_var :: proc(env: Gc_Ref(Env), var: Symbol) {
 	}
 }
 op_collect_cycles :: proc(env: Gc_Ref(Env)) {
-	root_env := env
-	for root_env.ptr.parent.ptr != nil do root_env = root_env.ptr.parent
-
 	fmt.println("running cycle collection...")
-	gc_mark(root_env)
+	gc_mark(env)
 	gc_stats()
 	gc_sweep()
 	fmt.println("done!")
@@ -741,7 +742,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 				ref_drop(old_env)
 			}
 
-		case .Collect_Cycles: op_collect_cycles(env)
+		case .Collect_Cycles: op_collect_cycles(cur_env)
 		case .Gc_Stats:
 			// TODO: mark before & unmark after?
 			gc_stats()
@@ -814,7 +815,7 @@ main :: proc() {
 				ref_drop(old_env)
 			}
 
-		case .Collect_Cycles: op_collect_cycles(root_env)
+		case .Collect_Cycles: op_collect_cycles(cur_env)
 		case .Gc_Stats:
 			// TODO: mark before & unmark after?
 			gc_stats()
