@@ -73,6 +73,9 @@ Operation_Type :: enum {
 	Gc_Stats,       // display GC stats
 	Inspect_Env,    // display the current environment
 
+	Show, // display the numeric value of a variable
+	Out,  // print variable as unicode character to stdout
+
 	Help, // display help
 
 	Call,  // call var args..
@@ -306,6 +309,7 @@ op_delete :: proc(op: Operation) {
 	case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
 	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip: fallthrough
 	case .Local: fallthrough
+	case .Show, .Out: fallthrough
 	case .Call, .Spill:
 		ref_drop(op.var)
 	}
@@ -324,6 +328,7 @@ op_copy :: proc(op: Operation) -> Operation {
 	case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
 	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip: fallthrough
 	case .Local: fallthrough
+	case .Show, .Out: fallthrough
 	case .Call, .Spill:
 		ref_copy(op.var)
 	}
@@ -354,6 +359,7 @@ op_visit_len :: proc(op: Operation) -> int {
 
 	case .Inc_Var, .Dec_Var: fallthrough
 	case .Local: fallthrough
+	case .Show, .Out: fallthrough
 	case .Spill:
 		return 1
 
@@ -430,6 +436,13 @@ op_type_map := [?] Op_Type_Mapping {
 	},
 	{ "ins", .Inspect_Env, "inspect-environment",
 		"dump the contents of the current environment (scope) and all ancestors",
+	},
+
+	{ "sho", .Show, "show",
+		"print a variable's value to the screen followed by a newline",
+	},
+	{ "out", .Out, "out",
+		"print a numeric variable to the screen as a unicode codepoint",
 	},
 
 	{ "hel", .Help, "help",
@@ -603,6 +616,7 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 
 	case .Inc_Var, .Dec_Var: fallthrough
 	case .Local: fallthrough
+	case .Show, .Out: fallthrough
 	case .Spill:
 		sym, has_sym := strings.split_iterator(&line, " ")
 		if !has_sym {
@@ -734,6 +748,24 @@ op_collect_cycles :: proc(envs: ..Gc_Ref(Env)) {
 	gc_sweep()
 	fmt.println("done!")
 }
+op_show :: proc(env: Gc_Ref(Env), var: Symbol) {
+	if val, ok := env_get(env, var); ok do switch &v in val^ {
+	case Symbol: fmt.println(v.ptr^)
+	case Number: fmt.println(v)
+	case Gc_Ref(Closure): fmt.printfln("<closure with {} arguments>", len(v.ptr.params))
+	} else {
+		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
+	}
+}
+op_out :: proc(env: Gc_Ref(Env), var: Symbol) {
+	if val, ok := env_get(env, var); ok do switch &v in val^ {
+	case Symbol: fmt.eprintln("error: can only display integer variables as unicode")
+	case Number: fmt.print(rune(v))
+	case Gc_Ref(Closure): fmt.eprintln("error: can only display integer variables as unicode")
+	} else {
+		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
+	}
+}
 op_help :: proc() {
 	fmt.println("The following commands are registered:")
 	for mapping in op_type_map {
@@ -829,6 +861,9 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 			gc_stats()
 		case .Inspect_Env: env_display(cur_env)
 
+		case .Show: op_show(cur_env, op.var)
+		case .Out: op_out(cur_env, op.var)
+
 		case .Help: op_help()
 
 		case .Call: op_call(cur_env, op.var, op.args)
@@ -906,6 +941,9 @@ op_spill :: proc(env: Gc_Ref(Env), var: Symbol) {
 			// TODO: mark before & unmark after?
 			gc_stats()
 		case .Inspect_Env: env_display(cur_env)
+
+		case .Show: op_show(cur_env, op.var)
+		case .Out: op_out(cur_env, op.var)
 
 		case .Help: op_help()
 
@@ -1093,6 +1131,9 @@ main :: proc() {
 			gc_stats()
 		case .Inspect_Env:
 			env_display(cur_env)
+
+		case .Show: op_show(cur_env, op.var)
+		case .Out: op_out(cur_env, op.var)
 
 		case .Help: op_help()
 
