@@ -540,7 +540,7 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 		}
 
 		if len(line) != 0 {
-			fmt.eprintln("warning: operation %q (%s) takes only one argument, but junk was left after parsing variable name", name, op_type_str(type))
+			fmt.eprintfln("warning: operation %q (%s) takes only one argument, but junk was left after parsing variable name", name, op_type_str(type))
 		}
 
 		return { type, sym_new(sym), {}, {} }, true
@@ -583,7 +583,7 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 	case .End: fallthrough
 	case .Quit:
 		if len(line) != 0 {
-			fmt.eprintln("warning: operation %q (%s) does not take any arguments, but junk was left after parsing operation name", name, op_type_str(type))
+			fmt.eprintfln("warning: operation %q (%s) does not take any arguments, but junk was left after parsing operation name", name, op_type_str(type))
 		}
 
 		return { type, {}, {}, {} }, true
