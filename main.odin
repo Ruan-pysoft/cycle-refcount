@@ -57,6 +57,8 @@ Operation_Type :: enum {
 	Inc_Var, // var++
 	Dec_Var, // var--
 
+	Local, // create local variable
+
 	Eq_Skip, // if var == val skip line
 	Ne_Skip, // if var != val skip line
 	Lt_Skip, // if var <  val skip line
@@ -73,9 +75,10 @@ Operation_Type :: enum {
 
 	Help, // display help
 
-	Call, // call var args..
-	End,  // end closure definition
-	Tail, // rerun closure from the start
+	Call,  // call var args..
+	End,   // end closure definition
+	Tail,  // rerun closure from the start
+	Spill, // run closure in current environment
 
 	Quit, // quit program / closure
 }
@@ -300,7 +303,8 @@ op_delete :: proc(op: Operation) {
 	#partial switch op.type {
 	case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
 	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip: fallthrough
-	case .Call:
+	case .Local: fallthrough
+	case .Call, .Spill:
 		ref_drop(op.var)
 	}
 	#partial switch op.type {
@@ -317,7 +321,8 @@ op_copy :: proc(op: Operation) -> Operation {
 	#partial switch op.type {
 	case .Set_Var, .Inc_Var, .Dec_Var: fallthrough
 	case .Eq_Skip, .Ne_Skip, .Lt_Skip, .Le_Skip, .Gt_Skip, .Ge_Skip: fallthrough
-	case .Call:
+	case .Local: fallthrough
+	case .Call, .Spill:
 		ref_copy(op.var)
 	}
 	#partial switch op.type {
@@ -344,7 +349,9 @@ op_visit_len :: proc(op: Operation) -> int {
 	case .Quit:
 		return 0
 
-	case .Inc_Var, .Dec_Var:
+	case .Inc_Var, .Dec_Var: fallthrough
+	case .Local: fallthrough
+	case .Spill:
 		return 1
 
 	case .Set_Var: fallthrough
@@ -375,6 +382,8 @@ op_type_map := [?] Op_Type_Mapping {
 	{ "gt-", .Gt_Skip, "gt-skip" },
 	{ "ge-", .Ge_Skip, "ge-skip" },
 
+	{ "loc", .Local, "local" },
+
 	{ "ent", .Enter, "enter" },
 	{ "exi", .Exit, "exit" },
 
@@ -387,6 +396,7 @@ op_type_map := [?] Op_Type_Mapping {
 	{ "cal", .Call, "call" },
 	{ "end", .End, "end" },
 	{ "tai", .Tail, "tail" },
+	{ "spi", .Spill, "spill" },
 
 	{ "qui", .Quit, "quit" },
 }
@@ -534,7 +544,9 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 
 		return { type, sym_new(sym), val, {} }, true
 
-	case .Inc_Var, .Dec_Var:
+	case .Inc_Var, .Dec_Var: fallthrough
+	case .Local: fallthrough
+	case .Spill:
 		sym, has_sym := strings.split_iterator(&line, " ")
 		if !has_sym {
 			fmt.eprintfln("error: operation %q (%s) takes one argument, none provided", name, op_type_str(type))
@@ -652,6 +664,10 @@ op_dec_var :: proc(env: Gc_Ref(Env), var: Symbol) {
 		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
 	}
 }
+op_local :: proc(env: Gc_Ref(Env), var: Symbol) {
+	_, var_in_env := assoc_lookup(env.ptr.assocs[:], var)
+	if !var_in_env do env_insert(env, ref_copy(var), 0)
+}
 op_collect_cycles :: proc(envs: ..Gc_Ref(Env)) {
 	fmt.println("running cycle collection...")
 	for env in envs do gc_mark(env)
@@ -732,6 +748,8 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 		case .Gt_Skip: op_skip = op_gt_skip(cur_env, op.var, op.val)
 		case .Ge_Skip: op_skip = op_ge_skip(cur_env, op.var, op.val)
 
+		case .Local: op_local(cur_env, op.var)
+
 		case .Enter:
 			new_env := env_new()
 			new_env.ptr.parent = ref_copy(cur_env)
@@ -757,6 +775,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 		case .End:
 			fmt.eprintfln("Invalid command %s (THIS IS A BUG, THIS CODE PATH SHOULD BE UNREACHABLE)", op_type_str(.End))
 		case .Tail: idx = -1
+		case .Spill: op_spill(cur_env, op.var)
 
 		case .Quit: break run_loop
 
@@ -769,6 +788,82 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 		fmt.eprintln("warning: a closure should exit out from any extra environments it creates")
 	}
 	for cur_env != cls.ptr.env {
+		old_env := cur_env
+		cur_env = old_env.ptr.parent
+		ref_drop(old_env)
+	}
+}
+op_spill :: proc(env: Gc_Ref(Env), var: Symbol) {
+	cls_val, has_cls := env_get(env, var)
+	if !has_cls {
+		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
+		return
+	}
+
+	cls, cls_is_cls := cls_val^.(Gc_Ref(Closure))
+	if !cls_is_cls {
+		fmt.eprintfln("error: cannot call non-closure value")
+		return
+	}
+
+	cur_env := env
+	op_skip := false
+
+	run_loop: for idx := 0; idx < len(cls.ptr.ops); idx += 1 {
+		op := cls.ptr.ops[idx]
+
+		if !op_skip do switch op.type {
+		case .Set_Var: op_set_var(cur_env, op.var, op.val)
+		case .Inc_Var: op_inc_var(cur_env, op.var)
+		case .Dec_Var: op_dec_var(cur_env, op.var)
+
+		case .Eq_Skip: op_skip = op_eq_skip(cur_env, op.var, op.val)
+		case .Ne_Skip: op_skip = op_ne_skip(cur_env, op.var, op.val)
+		case .Lt_Skip: op_skip = op_lt_skip(cur_env, op.var, op.val)
+		case .Le_Skip: op_skip = op_le_skip(cur_env, op.var, op.val)
+		case .Gt_Skip: op_skip = op_gt_skip(cur_env, op.var, op.val)
+		case .Ge_Skip: op_skip = op_ge_skip(cur_env, op.var, op.val)
+
+		case .Local: op_local(cur_env, op.var)
+
+		case .Enter:
+			new_env := env_new()
+			new_env.ptr.parent = ref_copy(cur_env)
+			cur_env = new_env
+		case .Exit:
+			if cur_env == env {
+				fmt.eprintln("error: cannot exit from closure's arguments environment")
+			} else {
+				old_env := cur_env
+				cur_env = old_env.ptr.parent
+				ref_drop(old_env)
+			}
+
+		case .Collect_Cycles: op_collect_cycles(cur_env, env)
+		case .Gc_Stats:
+			// TODO: mark before & unmark after?
+			gc_stats()
+		case .Inspect_Env: env_display(cur_env)
+
+		case .Help: op_help()
+
+		case .Call: op_call(cur_env, op.var, op.args)
+		case .End:
+			fmt.eprintfln("Invalid command %s (THIS IS A BUG, THIS CODE PATH SHOULD BE UNREACHABLE)", op_type_str(.End))
+		case .Tail: idx = -1
+		case .Spill: op_spill(cur_env, op.var)
+
+		case .Quit: break run_loop
+
+		case .Invalid: panic("unreachable")
+		}
+		else do op_skip = false
+	}
+
+	if cur_env != env {
+		fmt.eprintln("warning: a closure should exit out from any extra environments it creates")
+	}
+	for cur_env != env {
 		old_env := cur_env
 		cur_env = old_env.ptr.parent
 		ref_drop(old_env)
@@ -913,6 +1008,8 @@ main :: proc() {
 		case .Gt_Skip: op_skip = op_gt_skip(cur_env, op.var, op.val)
 		case .Ge_Skip: op_skip = op_ge_skip(cur_env, op.var, op.val)
 
+		case .Local: op_local(cur_env, op.var)
+
 		case .Enter:
 			new_env := env_new()
 			new_env.ptr.parent = ref_copy(cur_env)
@@ -940,6 +1037,7 @@ main :: proc() {
 			fmt.eprintfln("Invalid command %s -- %s should only be called to finish a closure definition", op_type_str(.End), op_type_str(.End))
 		case .Tail:
 			fmt.eprintfln("Invalid command %s -- %s should only be called inside of a closure", op_type_str(.Tail), op_type_str(.Tail))
+		case .Spill: op_spill(cur_env, op.var)
 
 		case .Quit: return
 
