@@ -74,7 +74,8 @@ Operation_Type :: enum {
 	Help, // display help
 
 	Call, // call var args..
-	End, // end closure definition def
+	End,  // end closure definition
+	Tail, // rerun closure from the start
 
 	Quit, // quit program / closure
 }
@@ -339,7 +340,7 @@ op_visit_len :: proc(op: Operation) -> int {
 	case .Enter, .Exit: fallthrough
 	case .Collect_Cycles, .Gc_Stats, .Inspect_Env: fallthrough
 	case .Help: fallthrough
-	case .End: fallthrough
+	case .End, .Tail: fallthrough
 	case .Quit:
 		return 0
 
@@ -385,6 +386,7 @@ op_type_map := [?] Op_Type_Mapping {
 
 	{ "cal", .Call, "call" },
 	{ "end", .End, "end" },
+	{ "tai", .Tail, "tail" },
 
 	{ "qui", .Quit, "quit" },
 }
@@ -580,7 +582,7 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 	case .Enter, .Exit: fallthrough
 	case .Collect_Cycles, .Gc_Stats, .Inspect_Env: fallthrough
 	case .Help: fallthrough
-	case .End: fallthrough
+	case .End, .Tail: fallthrough
 	case .Quit:
 		if len(line) != 0 {
 			fmt.eprintfln("warning: operation %q (%s) does not take any arguments, but junk was left after parsing operation name", name, op_type_str(type))
@@ -754,6 +756,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 		case .Call: op_call(cur_env, op.var, op.args)
 		case .End:
 			fmt.eprintfln("Invalid command %s (THIS IS A BUG, THIS CODE PATH SHOULD BE UNREACHABLE)", op_type_str(.End))
+		case .Tail: idx = -1
 
 		case .Quit: break run_loop
 
@@ -935,6 +938,8 @@ main :: proc() {
 		case .Call: op_call(cur_env, op.var, op.args)
 		case .End:
 			fmt.eprintfln("Invalid command %s -- %s should only be called to finish a closure definition", op_type_str(.End), op_type_str(.End))
+		case .Tail:
+			fmt.eprintfln("Invalid command %s -- %s should only be called inside of a closure", op_type_str(.Tail), op_type_str(.Tail))
 
 		case .Quit: return
 
