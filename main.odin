@@ -80,6 +80,8 @@ Operation_Type :: enum {
 	Tail,  // rerun closure from the start
 	Spill, // run closure in current environment
 
+	Remark, // comment
+
 	Quit, // quit program / closure
 }
 
@@ -346,6 +348,7 @@ op_visit_len :: proc(op: Operation) -> int {
 	case .Collect_Cycles, .Gc_Stats, .Inspect_Env: fallthrough
 	case .Help: fallthrough
 	case .End, .Tail: fallthrough
+	case .Remark: fallthrough
 	case .Quit:
 		return 0
 
@@ -444,6 +447,10 @@ op_type_map := [?] Op_Type_Mapping {
 	},
 	{ "spi", .Spill, "spill",
 		"call the provided function, but run it in the current scope rather than in its closed-over environment; note that you must set the arguments manually first!",
+	},
+
+	{ "rem", .Remark, "remark",
+		"write a comment; you may put any text after the command and before the newline and it will be ignored",
 	},
 
 	{ "qui", .Quit, "quit",
@@ -652,6 +659,8 @@ parse_op :: proc(line: string) -> (op: Operation, ok: bool) {
 
 		return { type, {}, {}, {} }, true
 
+	case .Remark: return { type, {}, {}, {} }, true
+
 	case .Invalid: fallthrough
 	case: panic("unreachable")
 	}
@@ -828,6 +837,8 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 		case .Tail: idx = -1
 		case .Spill: op_spill(cur_env, op.var)
 
+		case .Remark: _ = 0
+
 		case .Quit: break run_loop
 
 		case .Invalid: panic("unreachable")
@@ -903,6 +914,8 @@ op_spill :: proc(env: Gc_Ref(Env), var: Symbol) {
 			fmt.eprintfln("Invalid command %s (THIS IS A BUG, THIS CODE PATH SHOULD BE UNREACHABLE)", op_type_str(.End))
 		case .Tail: idx = -1
 		case .Spill: op_spill(cur_env, op.var)
+
+		case .Remark: _ = 0
 
 		case .Quit: break run_loop
 
@@ -1035,7 +1048,7 @@ main :: proc() {
 	cur_env := root_env
 	op_skip := false
 
-	for {
+	run_loop: for {
 		line := read_line("> ", 1024)
 		_full_line := line
 		defer delete(_full_line)
@@ -1090,12 +1103,18 @@ main :: proc() {
 			fmt.eprintfln("Invalid command %s -- %s should only be called inside of a closure", op_type_str(.Tail), op_type_str(.Tail))
 		case .Spill: op_spill(cur_env, op.var)
 
-		case .Quit: return
+		case .Remark: _ = 0
+
+		case .Quit: break run_loop
 
 		case .Invalid: panic("unreachable")
 		}
 		else do op_skip = false
 	}
+
+	fmt.eprintln("RUNNING FINAL GC CLEANUP...")
+	gc_stats()
+	gc_sweep()
 }
 
 read_line :: proc(

@@ -1,4 +1,4 @@
-help // run this program with `cat fib.prog | odin run .`
+rem // run this program with `cat fib.prog | odin run .`
 
 set @+ 0
 set + : a b ->
@@ -34,6 +34,7 @@ set fib : n ->
 end
 
 call fib 20
-ins // the 20th fibonacci number (6765) should be stored in the variable `@fib`.
+rem the 20th fibonacci number (6765) should be stored in the variable `@fib`.
+ins
 col
 quit
