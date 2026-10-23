@@ -713,21 +713,22 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 	}
 
 	cur_env := cls_env
+	op_skip := false
 
 	run_loop: for idx := 0; idx < len(cls.ptr.ops); idx += 1 {
 		op := cls.ptr.ops[idx]
 
-		switch op.type {
+		if !op_skip do switch op.type {
 		case .Set_Var: op_set_var(cur_env, op.var, op.val)
 		case .Inc_Var: op_inc_var(cur_env, op.var)
 		case .Dec_Var: op_dec_var(cur_env, op.var)
 
-		case .Eq_Skip: panic("TODO")
-		case .Ne_Skip: panic("TODO")
-		case .Lt_Skip: panic("TODO")
-		case .Le_Skip: panic("TODO")
-		case .Gt_Skip: panic("TODO")
-		case .Ge_Skip: panic("TODO")
+		case .Eq_Skip: op_skip = op_eq_skip(cur_env, op.var, op.val)
+		case .Ne_Skip: op_skip = op_ne_skip(cur_env, op.var, op.val)
+		case .Lt_Skip: op_skip = op_lt_skip(cur_env, op.var, op.val)
+		case .Le_Skip: op_skip = op_le_skip(cur_env, op.var, op.val)
+		case .Gt_Skip: op_skip = op_gt_skip(cur_env, op.var, op.val)
+		case .Ge_Skip: op_skip = op_ge_skip(cur_env, op.var, op.val)
 
 		case .Enter:
 			new_env := env_new()
@@ -758,6 +759,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 
 		case .Invalid: panic("unreachable")
 		}
+		else do op_skip = false
 	}
 
 	if cur_env != cls_env {
@@ -769,6 +771,111 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 		ref_drop(old_env)
 	}
 }
+Cmp_Res :: enum {
+	Eq,
+	Lt,
+	Gt,
+	Incomparible,
+	Type_Mismatch,
+}
+val_cmp :: proc(a, b: Value) -> Cmp_Res {
+	switch a in a {
+	case Symbol:
+		b, ok := b.(Symbol)
+		if !ok do return .Type_Mismatch
+		cmp_res := strings.compare(a.ptr^, b.ptr^)
+		return cmp_res == 0 ? .Eq : cmp_res < 0 ? .Lt : .Gt
+	case Number:
+		b, ok := b.(Number)
+		if !ok do return .Type_Mismatch
+		return a == b ? .Eq : a < b ? .Lt : .Gt
+	case Gc_Ref(Closure):
+		b, ok := b.(Gc_Ref(Closure))
+		if !ok do return .Type_Mismatch
+		return a.ptr == b.ptr ? .Eq : .Incomparible
+	case: panic("unreachable")
+	}
+}
+op_eq_skip :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) -> (skip: bool) {
+	if var_val, ok := env_get(env, var); ok {
+		val, ok := resolve_val(env, val)
+		if !ok do return
+
+		skip = val_cmp(var_val^, val) == .Eq
+		val_drop(val)
+		return skip
+	} else {
+		fmt.eprintfln("error: variable %q is not defined", var.ptr^)
+		return false
+	}
+}
+op_ne_skip :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) -> (skip: bool) {
+	if var_val, ok := env_get(env, var); ok {
+		val, ok := resolve_val(env, val)
+		if !ok do return
+
+		skip = val_cmp(var_val^, val) != .Eq
+		val_drop(val)
+		return skip
+	} else {
+		fmt.eprintfln("error: variable %q is not defined", var.ptr^)
+		return false
+	}
+}
+op_lt_skip :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) -> (skip: bool) {
+	if var_val, ok := env_get(env, var); ok {
+		val, ok := resolve_val(env, val)
+		if !ok do return
+
+		skip = val_cmp(var_val^, val) == .Lt
+		val_drop(val)
+		return skip
+	} else {
+		fmt.eprintfln("error: variable %q is not defined", var.ptr^)
+		return false
+	}
+}
+op_le_skip :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) -> (skip: bool) {
+	if var_val, ok := env_get(env, var); ok {
+		val, ok := resolve_val(env, val)
+		if !ok do return
+
+		cmp := val_cmp(var_val^, val)
+		skip = cmp == .Lt || cmp == .Eq
+		val_drop(val)
+		return skip
+	} else {
+		fmt.eprintfln("error: variable %q is not defined", var.ptr^)
+		return false
+	}
+}
+op_gt_skip :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) -> (skip: bool) {
+	if var_val, ok := env_get(env, var); ok {
+		val, ok := resolve_val(env, val)
+		if !ok do return
+
+		skip = val_cmp(var_val^, val) == .Gt
+		val_drop(val)
+		return skip
+	} else {
+		fmt.eprintfln("error: variable %q is not defined", var.ptr^)
+		return false
+	}
+}
+op_ge_skip :: proc(env: Gc_Ref(Env), var: Symbol, val: Value) -> (skip: bool) {
+	if var_val, ok := env_get(env, var); ok {
+		val, ok := resolve_val(env, val)
+		if !ok do return
+
+		cmp := val_cmp(var_val^, val)
+		skip = cmp == .Gt || cmp == .Eq
+		val_drop(val)
+		return skip
+	} else {
+		fmt.eprintfln("error: variable %q is not defined", var.ptr^)
+		return false
+	}
+}
 
 main :: proc() {
 	root_env := env_new()
@@ -777,6 +884,7 @@ main :: proc() {
 	fmt.println("Enter `help` to get a quick overview of available commands")
 
 	cur_env := root_env
+	op_skip := false
 
 	for {
 		line := read_line("> ", 1024)
@@ -790,17 +898,17 @@ main :: proc() {
 		if !has_op do continue
 		defer op_delete(op)
 
-		switch op.type {
+		if !op_skip do switch op.type {
 		case .Set_Var: op_set_var(cur_env, op.var, op.val)
 		case .Inc_Var: op_inc_var(cur_env, op.var)
 		case .Dec_Var: op_dec_var(cur_env, op.var)
 
-		case .Eq_Skip: panic("TODO")
-		case .Ne_Skip: panic("TODO")
-		case .Lt_Skip: panic("TODO")
-		case .Le_Skip: panic("TODO")
-		case .Gt_Skip: panic("TODO")
-		case .Ge_Skip: panic("TODO")
+		case .Eq_Skip: op_skip = op_eq_skip(cur_env, op.var, op.val)
+		case .Ne_Skip: op_skip = op_ne_skip(cur_env, op.var, op.val)
+		case .Lt_Skip: op_skip = op_lt_skip(cur_env, op.var, op.val)
+		case .Le_Skip: op_skip = op_le_skip(cur_env, op.var, op.val)
+		case .Gt_Skip: op_skip = op_gt_skip(cur_env, op.var, op.val)
+		case .Ge_Skip: op_skip = op_ge_skip(cur_env, op.var, op.val)
 
 		case .Enter:
 			new_env := env_new()
@@ -832,6 +940,7 @@ main :: proc() {
 
 		case .Invalid: panic("unreachable")
 		}
+		else do op_skip = false
 	}
 }
 
