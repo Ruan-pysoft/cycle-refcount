@@ -650,9 +650,9 @@ op_dec_var :: proc(env: Gc_Ref(Env), var: Symbol) {
 		fmt.eprintfln("error: variable %q doesn't exist", var.ptr^)
 	}
 }
-op_collect_cycles :: proc(env: Gc_Ref(Env)) {
+op_collect_cycles :: proc(envs: ..Gc_Ref(Env)) {
 	fmt.println("running cycle collection...")
-	gc_mark(env)
+	for env in envs do gc_mark(env)
 	gc_stats()
 	gc_sweep()
 	fmt.println("done!")
@@ -700,7 +700,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 	}
 
 	cls_env := env_new()
-	cls_env.ptr.parent = ref_copy(env)
+	cls_env.ptr.parent = ref_copy(cls.ptr.env)
 	// fmt.eprintln(cls.ptr.params)
 	for i in 0..<len(args) {
 		val, ok := resolve_val(env, args[i])
@@ -742,7 +742,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 				ref_drop(old_env)
 			}
 
-		case .Collect_Cycles: op_collect_cycles(cur_env)
+		case .Collect_Cycles: op_collect_cycles(cur_env, env)
 		case .Gc_Stats:
 			// TODO: mark before & unmark after?
 			gc_stats()
@@ -763,7 +763,7 @@ op_call :: proc(env: Gc_Ref(Env), var: Symbol, args: []Value) {
 	if cur_env != cls_env {
 		fmt.eprintln("warning: a closure should exit out from any extra environments it creates")
 	}
-	for cur_env != env {
+	for cur_env != cls.ptr.env {
 		old_env := cur_env
 		cur_env = old_env.ptr.parent
 		ref_drop(old_env)
