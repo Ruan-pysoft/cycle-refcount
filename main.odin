@@ -1153,6 +1153,8 @@ main :: proc() {
 		else do op_skip = false
 	}
 
+	fmt.eprintln("DROPPING ROOT ENVIRONMENT...")
+	ref_drop(root_env)
 	fmt.eprintln("RUNNING FINAL GC CLEANUP...")
 	gc_stats()
 	gc_sweep()
